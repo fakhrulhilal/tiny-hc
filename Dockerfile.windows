@@ -1,0 +1,14 @@
+# escape=`
+#
+# Windows image (amd64 only: Nano Server cannot run 32-bit executables),
+# assembled from binaries pre-built into dist/x86_64-pc-windows-msvc/.
+# Nano Server is the smallest Windows base; it ships cmd.exe, which cannot
+# be removed.
+#
+#   docker build -f Dockerfile.windows --build-arg WINDOWS_VERSION=ltsc2022 .
+ARG WINDOWS_VERSION=ltsc2022
+FROM mcr.microsoft.com/windows/nanoserver:${WINDOWS_VERSION}
+COPY dist/x86_64-pc-windows-msvc/tiny-hc.exe dist/x86_64-pc-windows-msvc/tiny-hc-tls.exe C:/tiny-hc/
+ENV PATH="C:\Windows\system32;C:\Windows;C:\tiny-hc"
+USER ContainerUser
+ENTRYPOINT ["C:\\tiny-hc\\tiny-hc.exe"]

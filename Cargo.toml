@@ -1,0 +1,47 @@
+cargo-features = ["panic-immediate-abort"]
+
+[package]
+name = "tiny-hc"
+version = "0.1.0"
+edition = "2024"
+description = "Tiny HTTP/HTTPS health check binary for containers"
+publish = false
+
+[lib]
+name = "tiny_hc"
+path = "src/lib.rs"
+
+# HTTP only. Build with: cargo build --release --bin tiny-hc
+[[bin]]
+name = "tiny-hc"
+path = "src/bin/tiny-hc.rs"
+
+# HTTP + HTTPS. Build with: cargo build --release --bin tiny-hc-tls --features tls
+[[bin]]
+name = "tiny-hc-tls"
+path = "src/bin/tiny-hc-tls.rs"
+required-features = ["tls"]
+
+[features]
+default = []
+# HTTPS through a trimmed mbedTLS compiled from vendor/mbedtls (scripts/fetch-mbedtls.sh).
+tls = ["dep:cc"]
+
+[build-dependencies]
+cc = { version = "1.2", optional = true }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false
+incremental = false
+
+# What scripts/build.sh ships: release plus a size-optimised std, built with
+#   -Zbuild-std=std,panic_abort -Zbuild-std-features=optimize_for_size
+# Panics abort without printing anything (all errors are handled explicitly).
+[profile.dist]
+inherits = "release"
+panic = "immediate-abort"

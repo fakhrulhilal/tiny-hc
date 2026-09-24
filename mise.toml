@@ -1,0 +1,7 @@
+# Development tools. Keep rust in sync with rust-toolchain.toml: a global
+# mise `rust` setting exports RUSTUP_TOOLCHAIN, which would otherwise
+# override rust-toolchain.toml.
+[tools]
+github-cli = "latest"
+rust = { version = "nightly-2026-09-24", components = "rust-src,rustfmt,clippy" }
+zig = "0.16.0"

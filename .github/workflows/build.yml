@@ -1,0 +1,104 @@
+name: build
+
+# Builds both binaries for every supported target and uploads:
+#   bin-<target>      raw binaries (used to assemble Docker images)
+#   archive-<target>  tiny-hc-<target>.tar.gz / .zip (release assets, mise)
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
+          - { target: i686-unknown-linux-musl, os: ubuntu-latest }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+          - { target: i686-pc-windows-msvc, os: windows-latest }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.target }}
+      EXT: ${{ contains(matrix.target, 'windows') && '.exe' || '' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        run: rustup toolchain install && rustup target add "$TARGET"
+
+      - name: Install zig
+        if: contains(matrix.target, 'linux')
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Install cargo-zigbuild
+        if: contains(matrix.target, 'linux')
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: scripts/build.sh "$TARGET" dist
+
+      - name: Smoke test
+        run: |
+          "dist/tiny-hc$EXT" --version
+          "dist/tiny-hc-tls$EXT" --version
+          "dist/tiny-hc-tls$EXT" --timeout 15 https://github.com/
+          "dist/tiny-hc-tls$EXT" --timeout 15 https://self-signed.badssl.com/
+          if "dist/tiny-hc$EXT" https://github.com/; then
+            echo "tiny-hc must reject https URLs" >&2; exit 1
+          fi
+
+      - name: Report sizes
+        run: |
+          http=$(wc -c < "dist/tiny-hc$EXT"); https=$(wc -c < "dist/tiny-hc-tls$EXT")
+          diff=$(( (https - http) / 1024 ))
+          {
+            echo "### $TARGET"
+            echo "| binary | bytes |"
+            echo "|---|---|"
+            echo "| tiny-hc | $http |"
+            echo "| tiny-hc-tls | $https |"
+            echo
+            echo "TLS adds ${diff} KiB."
+          } >> "$GITHUB_STEP_SUMMARY"
+          # The two-binary split only pays off while TLS costs more than 100 KB.
+          if (( https - http <= 100 * 1024 )); then
+            echo "::warning::TLS only adds ${diff} KiB on $TARGET; a single binary would do."
+          fi
+
+      - name: Package
+        run: |
+          mkdir -p archive
+          cd dist
+          if [[ -n "$EXT" ]]; then
+            7z a -tzip "../archive/tiny-hc-$TARGET.zip" tiny-hc.exe tiny-hc-tls.exe
+          else
+            tar -czf "../archive/tiny-hc-$TARGET.tar.gz" tiny-hc tiny-hc-tls
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.target }}
+          path: archive/
+          if-no-files-found: error

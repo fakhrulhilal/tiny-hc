@@ -1,0 +1,76 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # Artifact attestations (signed SLSA build provenance).
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: archive-*
+          path: release/
+          merge-multiple: true
+
+      # The raw binaries, so a binary extracted from an archive can be verified too.
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: bin-*
+          path: bin/
+
+      - name: Checksums
+        working-directory: release
+        run: sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            release/*.tar.gz
+            release/*.zip
+            bin/*/tiny-hc*
+
+      # Fail before publishing if any asset or binary cannot be verified.
+      - name: Verify attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for f in release/*.tar.gz release/*.zip bin/*/tiny-hc*; do
+            echo "::group::$f"
+            gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"
+            echo "::endgroup::"
+          done
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+  docker:
+    needs: build
+    uses: ./.github/workflows/docker.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      push: true
+      version: ${{ github.ref_name }}
+    secrets:
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}

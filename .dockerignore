@@ -1,0 +1,3 @@
+# Images are assembled from pre-built binaries only (see scripts/build.sh).
+*
+!dist/
