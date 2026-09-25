@@ -5,6 +5,7 @@ name = "tiny-hc"
 version = "0.1.1"
 edition = "2024"
 description = "Tiny HTTP/HTTPS health check binary for containers"
+license = "MIT"
 publish = false
 
 [lib]

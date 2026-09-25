@@ -122,6 +122,7 @@ jobs:
           docker buildx build --push --platform "$PLATFORMS" --provenance=false --sbom=false \
             --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
             --label "org.opencontainers.image.version=${{ inputs.version }}" \
+            --label "org.opencontainers.image.licenses=MIT" \
             "${args[@]}" .
 
       - name: Verify every tag has every platform

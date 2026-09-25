@@ -295,4 +295,5 @@ To update mbedTLS: change `version` and `sha256` in `scripts/fetch-mbedtls.sh`
 
 ## License
 
-The bundled mbedTLS is licensed under Apache-2.0 OR GPL-2.0-or-later.
+[MIT](LICENSE). The bundled mbedTLS (in `tiny-hc-tls`) is licensed under
+Apache-2.0 OR GPL-2.0-or-later.
