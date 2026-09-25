@@ -40,6 +40,8 @@
 #define PSA_WANT_KEY_TYPE_RSA_PUBLIC_KEY
 /* Required by MBEDTLS_KEY_EXCHANGE_ECDHE_RSA_ENABLED; unused code is dropped by the linker. */
 #define PSA_WANT_KEY_TYPE_RSA_KEY_PAIR_BASIC
+/* Required by MBEDTLS_X509_RSASSA_PSS_SUPPORT (RSA-PSS for TLS 1.3); unused, dropped by the linker. */
+#define PSA_WANT_ALG_RSA_OAEP
 
 #define MBEDTLS_PSA_CRYPTO_C
 #define MBEDTLS_PSA_BUILTIN_GET_ENTROPY

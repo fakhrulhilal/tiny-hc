@@ -105,7 +105,7 @@ jobs:
             exit 0
           fi
           {
-            printf '\n## 🐋 Docker images\n\nlinux/amd64 and linux/386:\n\n```\n'
+            printf '\n## 🐋 Docker images\n\nlinux/amd64, linux/386 and linux/arm64:\n\n```\n'
             printf '%s\n' "$TAGS"
             printf '```\n'
           } >> notes.md

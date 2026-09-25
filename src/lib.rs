@@ -6,19 +6,19 @@
 //! `HEALTHCHECK` command.
 //!
 //! The HTTP/1.1 client is hand written on top of `std` to keep the binary
-//! small. HTTPS support (a trimmed mbedTLS that never verifies certificates)
-//! is only compiled in with the `tls` feature.
+//! small; HTTPS uses a trimmed mbedTLS that never verifies certificates.
+//! Redirects are followed only with `-L`, up to `--max-redirs`.
 
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-#[cfg(feature = "tls")]
 mod tls;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_TIMEOUT_SECS: f64 = 5.0;
+const DEFAULT_MAX_REDIRS: u32 = 3;
 /// Upper bound of response headers we are willing to buffer.
 const MAX_HEAD: usize = 64 * 1024;
 /// Upper bound of response body we are willing to buffer for `--expect-response`.
@@ -30,6 +30,9 @@ pub struct Options {
     pub timeout: Duration,
     pub basic_auth: Option<String>,
     pub expect_response: Option<String>,
+    /// Follow redirects (`-L`).
+    pub location: bool,
+    pub max_redirs: u32,
 }
 
 #[derive(Debug, PartialEq)]
@@ -39,7 +42,7 @@ enum Command {
     Version,
 }
 
-/// Entry point shared by both binaries.
+/// Entry point of the binary.
 pub fn run(bin: &str) -> ExitCode {
     let result = parse_args(std::env::args().skip(1)).and_then(|cmd| match cmd {
         Command::Help => {
@@ -62,23 +65,20 @@ pub fn run(bin: &str) -> ExitCode {
 }
 
 fn help(bin: &str) -> String {
-    let https = if cfg!(feature = "tls") {
-        "http:// or https:// (certificates are not verified)"
-    } else {
-        "http:// (this build has no TLS support)"
-    };
     format!(
         "{bin} {VERSION} - tiny HTTP health check
 
 Usage: {bin} [OPTIONS] <URL>
 
-  URL must start with {https}.
+  URL must start with http:// or https:// (certificates are not verified).
   Exits 0 when the response status is 2xx, 1 otherwise.
 
 Options:
-  -t, --timeout <SECONDS>         Whole request timeout, fractions allowed [default: 5]
+  -t, --timeout <SECONDS>         Whole check timeout, fractions allowed [default: 5]
       --basic-auth <USER:PASS>    Send HTTP basic authentication
-      --expect-response <TEXT>    Also require the response body to contain TEXT
+      --expect-response <TEXT>    Also require the body to contain TEXT as whole word(s), any case
+  -L, --location                  Follow redirects
+      --max-redirs <NUM>          Maximum redirects to follow with -L [default: 3]
   -h, --help                      Print help
   -V, --version                   Print version
 "
@@ -91,6 +91,8 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, String>
     let mut timeout = DEFAULT_TIMEOUT_SECS;
     let mut basic_auth = None;
     let mut expect_response = None;
+    let mut location = false;
+    let mut max_redirs = DEFAULT_MAX_REDIRS;
     let mut only_positional = false;
 
     while let Some(arg) = args.next() {
@@ -114,6 +116,16 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, String>
             }
             "--basic-auth" => basic_auth = Some(value()?),
             "--expect-response" => expect_response = Some(value()?),
+            "-L" | "--location" => {
+                if inline.is_some() {
+                    return Err(format!("{name} does not take a value"));
+                }
+                location = true;
+            }
+            "--max-redirs" => {
+                let v = value()?;
+                max_redirs = v.parse().map_err(|_| format!("invalid --max-redirs: {v}"))?;
+            }
             "--" => only_positional = true,
             _ => return Err(format!("unknown option: {name} (see --help)")),
         }
@@ -124,10 +136,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, String>
         timeout: Duration::from_secs_f64(timeout),
         basic_auth,
         expect_response,
+        location,
+        max_redirs,
     }))
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 struct Url {
     https: bool,
     host: String,
@@ -176,6 +190,27 @@ impl Url {
             None => 80,
         };
         Ok(Url { https, host: host.to_string(), port, target, userinfo })
+    }
+
+    /// Resolves a `Location` header value against this URL.
+    fn join(&self, location: &str) -> Result<Url, String> {
+        if location.contains("://") {
+            return Url::parse(location);
+        }
+        let scheme = if self.https { "https" } else { "http" };
+        if location.starts_with("//") {
+            return Url::parse(&format!("{scheme}:{location}"));
+        }
+        let location = location.split('#').next().unwrap_or_default();
+        let target = if location.starts_with('/') {
+            location.to_string()
+        } else {
+            // Relative to the current path's directory.
+            let path = self.target.split('?').next().unwrap_or("/");
+            let dir = &path[..=path.rfind('/').unwrap_or(0)];
+            format!("{dir}{location}")
+        };
+        Ok(Url { target, userinfo: None, ..self.clone() })
     }
 
     fn host_header(&self) -> String {
@@ -276,49 +311,79 @@ impl<T: Read + Write> Stream for T {}
 
 /// Runs the health check.
 pub fn check(opts: &Options) -> Result<(), String> {
-    let url = Url::parse(&opts.url)?;
-    if url.https && !cfg!(feature = "tls") {
-        return Err("https is not supported by this binary, use tiny-hc-tls".into());
-    }
     let deadline = Instant::now() + opts.timeout;
-    let conn = connect(&url, deadline)?;
+    let mut url = Url::parse(&opts.url)?;
+    // Credentials only go to the host they were given for, like curl (an
+    // http -> https redirect on the same host keeps them). --basic-auth wins
+    // over credentials in the URL.
+    let given = opts.basic_auth.clone().or_else(|| url.userinfo.clone());
+    let first_host = url.host.clone();
+    let mut redirects = 0;
+    loop {
+        let auth = given.clone().filter(|_| url.host.eq_ignore_ascii_case(&first_host)).or_else(|| url.userinfo.clone());
+        let res = fetch(&url, auth.as_deref(), deadline, opts.expect_response.is_some())?;
 
-    let mut stream: Box<dyn Stream> = if url.https {
-        #[cfg(feature = "tls")]
-        {
-            Box::new(tls::wrap(conn, &url.host)?)
+        if matches!(res.status, 301 | 302 | 303 | 307 | 308) {
+            if !opts.location {
+                return Err(format!("unhealthy: HTTP status {} (use -L to follow redirects)", res.status));
+            }
+            if redirects == opts.max_redirs {
+                return Err(format!("unhealthy: more than {} redirects (see --max-redirs)", opts.max_redirs));
+            }
+            let location = res.location.ok_or_else(|| format!("unhealthy: HTTP status {} without a Location header", res.status))?;
+            url = url.join(&location)?;
+            redirects += 1;
+            continue;
         }
-        #[cfg(not(feature = "tls"))]
-        unreachable!()
-    } else {
-        Box::new(conn)
-    };
+        if !(200..300).contains(&res.status) {
+            return Err(format!("unhealthy: HTTP status {}", res.status));
+        }
+        if let Some(expected) = &opts.expect_response
+            && !contains(&res.body, expected.as_bytes())
+        {
+            return Err(format!("unhealthy: response does not contain {expected:?}"));
+        }
+        return Ok(());
+    }
+}
+
+struct Response {
+    status: u16,
+    location: Option<String>,
+    body: Vec<u8>,
+}
+
+/// Sends one GET request and reads the response (the body only if `want_body`).
+fn fetch(url: &Url, auth: Option<&str>, deadline: Instant, want_body: bool) -> Result<Response, String> {
+    let conn = connect(url, deadline)?;
+    let mut stream: Box<dyn Stream> = if url.https { Box::new(tls::wrap(conn, &url.host)?) } else { Box::new(conn) };
 
     let mut req = format!(
         "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: tiny-hc/{VERSION}\r\nAccept: */*\r\nConnection: close\r\n",
         url.target,
         url.host_header()
     );
-    if let Some(auth) = opts.basic_auth.as_ref().or(url.userinfo.as_ref()) {
+    if let Some(auth) = auth {
         req += &format!("Authorization: Basic {}\r\n", base64(auth.as_bytes()));
     }
     req += "\r\n";
     stream.write_all(req.as_bytes()).and_then(|()| stream.flush()).map_err(|e| format!("send request: {e}"))?;
-
-    let (status, body) = read_response(&mut stream, opts.expect_response.is_some())?;
-    if !(200..300).contains(&status) {
-        return Err(format!("unhealthy: HTTP status {status}"));
-    }
-    if let Some(expected) = &opts.expect_response
-        && !contains(&body, expected.as_bytes())
-    {
-        return Err(format!("unhealthy: response does not contain {expected:?}"));
-    }
-    Ok(())
+    read_response(&mut stream, want_body)
 }
 
+/// Whole-word, case-insensitive (ASCII) match: "healthy" matches "Healthy",
+/// but "health" does not. Where `needle` starts or ends with a word character,
+/// the neighbouring body character must not be one.
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    needle.is_empty() || haystack.windows(needle.len()).any(|w| w == needle)
+    let word = |c: &u8| c.is_ascii_alphanumeric() || *c == b'_';
+    let (Some(first), Some(last)) = (needle.first(), needle.last()) else {
+        return true;
+    };
+    haystack.windows(needle.len()).enumerate().any(|(i, w)| {
+        w.eq_ignore_ascii_case(needle)
+            && !(word(first) && i > 0 && word(&haystack[i - 1]))
+            && !(word(last) && haystack.get(i + needle.len()).is_some_and(word))
+    })
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -343,8 +408,9 @@ fn read_some(stream: &mut dyn Read, buf: &mut Vec<u8>) -> Result<bool, String> {
     }
 }
 
-/// Returns the status code and, when `want_body` is set, the (de-chunked) body.
-fn read_response(stream: &mut dyn Read, want_body: bool) -> Result<(u16, Vec<u8>), String> {
+/// Reads the status, the `Location` header and, when `want_body` is set, the
+/// (de-chunked) body.
+fn read_response(stream: &mut dyn Read, want_body: bool) -> Result<Response, String> {
     let mut buf = Vec::new();
     let head_end = loop {
         if let Some(i) = find(&buf, b"\r\n\r\n") {
@@ -365,16 +431,16 @@ fn read_response(stream: &mut dyn Read, want_body: bool) -> Result<(u16, Vec<u8>
         .and_then(|l| l.split(' ').nth(1))
         .and_then(|s| s.parse::<u16>().ok())
         .ok_or("malformed HTTP status line")?;
-    if !want_body {
-        return Ok((status, Vec::new()));
-    }
 
     let mut content_length = None;
     let mut chunked = false;
+    let mut location = None;
     for line in lines {
         if let Some((k, v)) = line.split_once(':') {
             let (k, v) = (k.trim(), v.trim());
-            if k.eq_ignore_ascii_case("content-length") {
+            if k.eq_ignore_ascii_case("location") {
+                location = Some(v.to_string());
+            } else if k.eq_ignore_ascii_case("content-length") {
                 content_length = v.parse::<usize>().ok();
             } else if k.eq_ignore_ascii_case("transfer-encoding") {
                 chunked = v.to_ascii_lowercase().contains("chunked");
@@ -382,6 +448,9 @@ fn read_response(stream: &mut dyn Read, want_body: bool) -> Result<(u16, Vec<u8>
         }
     }
 
+    if !want_body {
+        return Ok(Response { status, location, body: Vec::new() });
+    }
     let mut body = buf.split_off(head_end + 4);
     loop {
         let done = match (chunked, content_length) {
@@ -398,7 +467,7 @@ fn read_response(stream: &mut dyn Read, want_body: bool) -> Result<(u16, Vec<u8>
     } else if let Some(n) = content_length {
         body.truncate(n);
     }
-    Ok((status, body))
+    Ok(Response { status, location, body })
 }
 
 /// Decodes a chunked body. Returns the data decoded so far and whether the
@@ -435,12 +504,20 @@ mod tests {
     }
 
     fn opts(url: &str) -> Options {
-        Options { url: url.into(), timeout: Duration::from_secs(5), basic_auth: None, expect_response: None }
+        Options {
+            url: url.into(),
+            timeout: Duration::from_secs(5),
+            basic_auth: None,
+            expect_response: None,
+            location: false,
+            max_redirs: DEFAULT_MAX_REDIRS,
+        }
     }
 
     #[test]
     fn parses_arguments() {
-        let got = args(&["--timeout=1.5", "--basic-auth", "u:p", "--expect-response", "-ok-", "http://x"]).unwrap();
+        let got =
+            args(&["--timeout=1.5", "--basic-auth", "u:p", "--expect-response", "-ok-", "-L", "--max-redirs", "5", "http://x"]).unwrap();
         assert_eq!(
             got,
             Command::Check(Options {
@@ -448,8 +525,13 @@ mod tests {
                 timeout: Duration::from_millis(1500),
                 basic_auth: Some("u:p".into()),
                 expect_response: Some("-ok-".into()),
+                location: true,
+                max_redirs: 5,
             })
         );
+        assert!(matches!(args(&["--location", "http://x"]).unwrap(), Command::Check(Options { location: true, max_redirs: 3, .. })));
+        assert!(args(&["--max-redirs", "-1", "http://x"]).is_err());
+        assert!(args(&["--location=yes", "http://x"]).is_err());
         assert_eq!(args(&["http://x"]).unwrap(), Command::Check(opts("http://x")));
         assert_eq!(args(&["-h"]).unwrap(), Command::Help);
         assert_eq!(args(&["--version"]).unwrap(), Command::Version);
@@ -494,22 +576,40 @@ mod tests {
     }
 
     /// Serves one canned response and returns the URL plus a handle yielding the raw request.
-    fn serve(response: &'static str) -> (String, thread::JoinHandle<String>) {
+    /// Answers one connection per response, in order. Returns the base URL
+    /// (`http://127.0.0.1:<port>`) and a handle yielding the raw requests.
+    fn serve_many(responses: Vec<String>) -> (String, thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://127.0.0.1:{}/health", listener.local_addr().unwrap().port());
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
         let handle = thread::spawn(move || {
-            let (mut s, _) = listener.accept().unwrap();
-            let mut req = Vec::new();
-            while find(&req, b"\r\n\r\n").is_none() {
-                let mut b = [0u8; 1024];
-                let n = s.read(&mut b).unwrap();
-                req.extend_from_slice(&b[..n]);
+            let mut requests = Vec::new();
+            for response in responses {
+                let (mut s, _) = listener.accept().unwrap();
+                let mut req = Vec::new();
+                while find(&req, b"\r\n\r\n").is_none() {
+                    let mut b = [0u8; 1024];
+                    let n = s.read(&mut b).unwrap();
+                    req.extend_from_slice(&b[..n]);
+                }
+                s.write_all(response.as_bytes()).unwrap();
+                requests.push(String::from_utf8(req).unwrap());
             }
-            s.write_all(response.as_bytes()).unwrap();
-            String::from_utf8(req).unwrap()
+            requests
         });
-        (url, handle)
+        (base, handle)
     }
+
+    /// Serves one canned response and returns the URL plus a handle yielding the raw request.
+    fn serve(response: &'static str) -> (String, thread::JoinHandle<String>) {
+        let (base, h) = serve_many(vec![response.into()]);
+        (format!("{base}/health"), thread::spawn(move || h.join().unwrap().remove(0)))
+    }
+
+    fn redirect(status: u16, location: &str) -> String {
+        format!("HTTP/1.1 {status} Moved\r\nLocation: {location}\r\nContent-Length: 0\r\n\r\n")
+    }
+
+    const OK: &str = "HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nHealthy";
 
     #[test]
     fn healthy_response() {
@@ -544,6 +644,25 @@ mod tests {
     }
 
     #[test]
+    fn expect_response_matches_whole_words_ignoring_case() {
+        let (url, h) = serve("HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nHealthy");
+        let mut o = opts(&url);
+        o.expect_response = Some("healthy".into());
+        assert_eq!(check(&o), Ok(()));
+        h.join().unwrap();
+
+        assert!(contains(b"Healthy", b"healthy"));
+        assert!(contains(b"Healthy\n", b"HEALTHY"));
+        assert!(!contains(b"Healthy", b"health"));
+        assert!(!contains(b"Unhealthy", b"healthy"));
+        assert!(contains(b"{\"status\":\"UP\"}", b"up"));
+        assert!(!contains(b"{\"status\":\"UPGRADING\"}", b"up"));
+        assert!(contains(b"{\"status\":\"UP\"}", b"\"status\":\"up\""));
+        assert!(contains(b"all systems ok", b"Systems OK"));
+        assert!(contains(b"anything", b""));
+    }
+
+    #[test]
     fn expect_response_chunked_and_eof() {
         let (url, h) = serve("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nhea\r\n5\r\nlthy!\r\n0\r\n\r\n");
         let mut o = opts(&url);
@@ -574,11 +693,88 @@ mod tests {
         assert!(check(&opts(&format!("http://127.0.0.1:{port}/"))).is_err());
     }
 
-    #[cfg(not(feature = "tls"))]
     #[test]
-    fn https_needs_tls_build() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let err = check(&opts(&format!("https://{}/", listener.local_addr().unwrap()))).unwrap_err();
-        assert!(err.contains("tiny-hc-tls"), "{err}");
+    fn redirects_need_location_flag() {
+        let (base, h) = serve_many(vec![redirect(301, "/ready")]);
+        let err = check(&opts(&format!("{base}/"))).unwrap_err();
+        assert!(err.contains("301") && err.contains("-L"), "{err}");
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn follows_redirects() {
+        // Absolute, then relative to the path's directory, then absolute path.
+        let (other, h2) = serve_many(vec![redirect(307, "status/ready?x=1"), OK.into()]);
+        let (base, h1) = serve_many(vec![redirect(302, &format!("{other}/app/start"))]);
+        let mut o = opts(&format!("{base}/"));
+        o.location = true;
+        o.expect_response = Some("healthy".into());
+        assert_eq!(check(&o), Ok(()));
+        let reqs = h2.join().unwrap();
+        assert!(reqs[0].starts_with("GET /app/start HTTP/1.1"), "{}", reqs[0]);
+        assert!(reqs[1].starts_with("GET /app/status/ready?x=1 HTTP/1.1"), "{}", reqs[1]);
+        h1.join().unwrap();
+    }
+
+    #[test]
+    fn stops_after_max_redirs() {
+        let (base, h) = serve_many((0..4).map(|_| redirect(302, "/again")).collect());
+        let mut o = opts(&format!("{base}/"));
+        o.location = true;
+        let err = check(&o).unwrap_err();
+        assert!(err.contains("more than 3 redirects"), "{err}");
+        assert_eq!(h.join().unwrap().len(), 4);
+
+        let (base, h) = serve_many(vec![redirect(302, "/next")]);
+        o = opts(&format!("{base}/"));
+        o.location = true;
+        o.max_redirs = 0;
+        assert!(check(&o).is_err());
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn redirect_keeps_auth_only_for_the_same_host() {
+        let (other, h2) = serve_many(vec![OK.into()]);
+        let other = other.replace("127.0.0.1", "localhost");
+        let (base, h1) = serve_many(vec![redirect(301, "/moved"), redirect(302, &format!("{other}/"))]);
+        let mut o = opts(&format!("{base}/"));
+        o.location = true;
+        o.basic_auth = Some("user:pass".into());
+        assert_eq!(check(&o), Ok(()));
+        let same = h1.join().unwrap();
+        assert!(same.iter().all(|r| r.contains("Authorization: Basic dXNlcjpwYXNz")), "{same:?}");
+        let moved = h2.join().unwrap();
+        assert!(!moved[0].contains("Authorization"), "{}", moved[0]);
+    }
+
+    #[test]
+    fn basic_auth_wins_and_url_credentials_follow_same_host_redirects() {
+        let (base, h) = serve_many(vec![redirect(302, "/next"), OK.into()]);
+        let mut o = opts(&base.replace("http://", "http://url:cred@"));
+        o.location = true;
+        assert_eq!(check(&o), Ok(()));
+        let reqs = h.join().unwrap();
+        let url_cred = format!("Authorization: Basic {}", base64(b"url:cred"));
+        assert!(reqs.iter().all(|r| r.contains(&url_cred)), "{reqs:?}");
+
+        let (base, h) = serve_many(vec![OK.into()]);
+        o = opts(&base.replace("http://", "http://url:cred@"));
+        o.basic_auth = Some("user:pass".into());
+        assert_eq!(check(&o), Ok(()));
+        assert!(h.join().unwrap()[0].contains("Authorization: Basic dXNlcjpwYXNz"));
+    }
+
+    #[test]
+    fn resolves_locations() {
+        let base = Url::parse("http://h:8080/a/b?q").unwrap();
+        let t = |loc: &str| {
+            let u = base.join(loc).unwrap();
+            format!("{}://{}{}", if u.https { "https" } else { "http" }, u.host_header(), u.target)
+        };
+        assert_eq!(t("https://h/x"), "https://h/x");
+        assert_eq!(t("//other/y"), "http://other/y");
+        assert_eq!(t("/c"), "http://h:8080/c");
+        assert_eq!(t("c?d=1#f"), "http://h:8080/a/c?d=1");
     }
 }

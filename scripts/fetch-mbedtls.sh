@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Downloads the pinned mbedTLS release into vendor/mbedtls (needed only for
-# the `tls` feature, i.e. tiny-hc-tls). Safe to re-run.
+# Downloads the pinned mbedTLS release into vendor/mbedtls (compiled into
+# tiny-hc by build.rs for HTTPS). Safe to re-run.
 set -euo pipefail
 
 version="4.2.0"

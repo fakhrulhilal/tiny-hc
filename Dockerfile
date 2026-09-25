@@ -2,7 +2,7 @@
 #
 # Linux image (linux/amd64, linux/386, linux/arm64), assembled from the static musl
 # binaries pre-built into dist/<rust-target>/ by scripts/build.sh. Built
-# FROM scratch: no shell, no package manager, only the two binaries in /bin.
+# FROM scratch: no shell, no package manager, only /bin/tiny-hc.
 # The binaries need no libc from the host, so they can be copied into
 # Debian, Ubuntu, Alpine, distroless or scratch images alike.
 #
@@ -10,11 +10,11 @@
 ARG TARGETARCH
 
 FROM scratch AS bin-amd64
-COPY dist/x86_64-unknown-linux-musl/tiny-hc dist/x86_64-unknown-linux-musl/tiny-hc-tls /
+COPY dist/x86_64-unknown-linux-musl/tiny-hc /
 FROM scratch AS bin-386
-COPY dist/i686-unknown-linux-musl/tiny-hc dist/i686-unknown-linux-musl/tiny-hc-tls /
+COPY dist/i686-unknown-linux-musl/tiny-hc /
 FROM scratch AS bin-arm64
-COPY dist/aarch64-unknown-linux-musl/tiny-hc dist/aarch64-unknown-linux-musl/tiny-hc-tls /
+COPY dist/aarch64-unknown-linux-musl/tiny-hc /
 
 FROM bin-${TARGETARCH} AS bin
 

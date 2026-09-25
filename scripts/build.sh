@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
-# Builds both binaries for one Rust target and copies them into an output dir.
+# Builds tiny-hc (HTTP + HTTPS via a trimmed mbedTLS) for one Rust target and
+# copies it into an output dir.
 #
 #   scripts/build.sh <rust-target> [out-dir]
-#
-#   tiny-hc      HTTP only
-#   tiny-hc-tls  HTTP + HTTPS (--features tls, trimmed mbedTLS)
 #
 # Uses the `dist` profile with std rebuilt for size (nightly -Zbuild-std).
 #
@@ -26,10 +24,7 @@ ext=""
 flags=(--locked --profile dist --target "$target"
   -Zbuild-std=std,panic_abort -Zbuild-std-features=optimize_for_size)
 "${cargo[@]}" "${flags[@]}" --bin tiny-hc
-"${cargo[@]}" "${flags[@]}" --bin tiny-hc-tls --features tls
 
 mkdir -p "$out"
-for bin in tiny-hc tiny-hc-tls; do
-  cp "target/$target/dist/$bin$ext" "$out/"
-done
+cp "target/$target/dist/tiny-hc$ext" "$out/"
 ls -l "$out"

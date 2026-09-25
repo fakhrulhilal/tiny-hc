@@ -113,11 +113,11 @@ jobs:
             bin="/dist/${pair##*:}-unknown-linux-musl"
             docker buildx build --load --platform "$platform" -t test .
             docker run --rm --platform "$platform" test --version
-            docker run --rm --platform "$platform" --entrypoint /bin/tiny-hc-tls test --timeout 15 https://github.com/
+            docker run --rm --platform "$platform" test --timeout 15 https://github.com/
             # The static binaries must also work when copied into glibc and musl images.
             for base in debian:stable-slim alpine:latest; do
               docker run --rm --platform "$platform" -v "$PWD/dist:/dist:ro" "$base" \
-                "$bin/tiny-hc-tls" --timeout 15 https://github.com/
+                "$bin/tiny-hc" --timeout 15 https://github.com/
             done
           done
 

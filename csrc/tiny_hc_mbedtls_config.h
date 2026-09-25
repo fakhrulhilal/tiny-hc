@@ -22,5 +22,8 @@
 /* The server certificate is parsed (for its public key) but never verified. */
 #define MBEDTLS_X509_USE_C
 #define MBEDTLS_X509_CRT_PARSE_C
+/* Also gates offering rsa_pss_rsae_* signature algorithms, which TLS 1.3
+ * requires for servers with RSA certificates. */
+#define MBEDTLS_X509_RSASSA_PSS_SUPPORT
 /* Required by the TLS 1.3 implementation. */
 #define MBEDTLS_SSL_KEEP_PEER_CERTIFICATE

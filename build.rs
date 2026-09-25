@@ -1,15 +1,13 @@
-//! Compiles the trimmed mbedTLS (and the small C wrapper around it) for the
-//! `tls` feature. Sources come from vendor/mbedtls (scripts/fetch-mbedtls.sh)
-//! or from the directory in MBEDTLS_DIR.
+//! Compiles the trimmed mbedTLS (and the small C wrapper around it). Sources
+//! come from vendor/mbedtls (scripts/fetch-mbedtls.sh) or from the directory
+//! in MBEDTLS_DIR.
 
 fn main() {
     println!("cargo:rerun-if-changed=csrc");
     println!("cargo:rerun-if-env-changed=MBEDTLS_DIR");
-    #[cfg(feature = "tls")]
     tls::build();
 }
 
-#[cfg(feature = "tls")]
 mod tls {
     use std::path::{Path, PathBuf};
 
