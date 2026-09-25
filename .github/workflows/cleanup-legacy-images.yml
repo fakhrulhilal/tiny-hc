@@ -1,0 +1,94 @@
+name: cleanup legacy images
+
+# One-off: removes the image tags of the old layout (`linux`, `windows-ltsc*`
+# and their versioned `*-linux` / `*-windows-ltsc*` variants) from ghcr.io and
+# Docker Hub, after rewriting `0.1.0` as a Linux-only image (it referenced the
+# Windows images). Runs as a dry run unless `dry_run` is unticked.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  DRY_RUN: ${{ inputs.dry_run }}
+  LEGACY: '^(.*-)?(linux|windows-ltsc2022|windows-ltsc2025)$'
+  GHCR_IMAGE: ghcr.io/${{ github.repository }}
+  HUB_REPO: ${{ vars.DOCKERHUB_IMAGE || format('{0}/tiny-hc', vars.DOCKERHUB_USERNAME) }}
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Rewrite 0.1.0 as linux/amd64 + linux/386 only
+        run: |
+          for image in "${GHCR_IMAGE,,}" "docker.io/${HUB_REPO,,}"; do
+            raw=$(docker buildx imagetools inspect "$image:0.1.0" --raw)
+            echo "$image:0.1.0 now: $(jq -rc '[.manifests[].platform | "\(.os)/\(.architecture)"]' <<< "$raw")"
+            sources=()
+            while read -r digest; do sources+=("$image@$digest"); done < <(
+              jq -r '.manifests[] | select(.platform.os == "linux") | .digest' <<< "$raw")
+            echo "  -> ${sources[*]}"
+            [[ "$DRY_RUN" == true ]] || docker buildx imagetools create -t "$image:0.1.0" "${sources[@]}"
+          done
+
+      - name: Delete legacy tags on Docker Hub
+        env:
+          HUB_USER: ${{ vars.DOCKERHUB_USERNAME }}
+          HUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          repo="${HUB_REPO,,}"
+          jwt=$(jq -n --arg u "$HUB_USER" --arg p "$HUB_TOKEN" '{username: $u, password: $p}' |
+            curl -fsS -H 'Content-Type: application/json' -d @- https://hub.docker.com/v2/users/login | jq -r .token)
+          echo "::add-mask::$jwt"
+          tags=$(curl -fsS "https://hub.docker.com/v2/repositories/$repo/tags?page_size=100" | jq -r '.results[].name')
+          echo "all tags: $(paste -sd' ' - <<< "$tags")"
+          grep -E "$LEGACY" <<< "$tags" | while read -r tag; do
+            echo "delete $repo:$tag"
+            [[ "$DRY_RUN" == true ]] && continue
+            code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "Authorization: Bearer $jwt" \
+              "https://hub.docker.com/v2/repositories/$repo/tags/$tag/")
+            [[ "$code" == 204 ]] || { echo "::error::deleting $repo:$tag returned HTTP $code"; exit 1; }
+          done
+
+      # ghcr.io cannot remove a single tag: delete each package version whose
+      # tags are all legacy. Untagged versions are left alone (0.1.0 still
+      # references the old Linux platform manifests).
+      - name: Delete legacy tags on ghcr.io
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER}"
+          name="${GITHUB_REPOSITORY#*/}"
+          gh api --paginate "/users/$owner/packages/container/$name/versions" \
+            --jq '.[] | select(.metadata.container.tags | length > 0) | "\(.id) \(.metadata.container.tags | join(","))"' |
+            while read -r id tags; do
+              if tr ',' '\n' <<< "$tags" | grep -vqE "$LEGACY"; then
+                echo "keep   $id [$tags]"
+                continue
+              fi
+              echo "delete $id [$tags]"
+              [[ "$DRY_RUN" == true ]] || gh api -X DELETE "/users/$owner/packages/container/$name/versions/$id"
+            done
