@@ -51,7 +51,12 @@ jobs:
             while read -r digest; do sources+=("$image@$digest"); done < <(
               jq -r '.manifests[] | select(.platform.os == "linux") | .digest' <<< "$raw")
             echo "  -> ${sources[*]}"
-            [[ "$DRY_RUN" == true ]] || docker buildx imagetools create -t "$image:0.1.0" "${sources[@]}"
+            # `docker manifest` does not carry over provenance entries (buildx
+            # imagetools does on Docker Hub, listing them as unknown/unknown).
+            if [[ "$DRY_RUN" != true ]]; then
+              docker manifest create --amend "$image:0.1.0" "${sources[@]}"
+              docker manifest push --purge "$image:0.1.0"
+            fi
           done
 
       # ghcr.io cannot remove a single tag: delete each package version whose
