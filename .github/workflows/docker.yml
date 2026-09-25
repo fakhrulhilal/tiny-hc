@@ -68,15 +68,19 @@ jobs:
     env:
       IMAGES: ${{ needs.meta.outputs.images }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           pattern: bin-*-linux-musl
           path: dist/
-      - run: for d in dist/bin-*; do mv "$d" "dist/${d#dist/bin-}"; done; ls -R dist
+      # Artifacts do not keep the executable bit.
+      - run: |
+          for d in dist/bin-*; do mv "$d" "dist/${d#dist/bin-}"; done
+          chmod +x dist/*/tiny-hc*
+          ls -lR dist
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Test
         run: |
@@ -94,14 +98,14 @@ jobs:
           done
 
       - if: inputs.push
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - if: inputs.push && needs.meta.outputs.dockerhub == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -130,9 +134,9 @@ jobs:
     env:
       IMAGES: ${{ needs.meta.outputs.images }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: bin-x86_64-pc-windows-msvc
           path: dist/x86_64-pc-windows-msvc/
@@ -150,14 +154,14 @@ jobs:
           docker run --rm --entrypoint 'C:\tiny-hc\tiny-hc-tls.exe' test --timeout 15 https://github.com/
 
       - if: inputs.push
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - if: inputs.push && needs.meta.outputs.dockerhub == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -179,18 +183,18 @@ jobs:
     env:
       IMAGES: ${{ needs.meta.outputs.images }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - if: needs.meta.outputs.dockerhub == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}

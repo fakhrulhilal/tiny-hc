@@ -29,7 +29,7 @@ jobs:
       TARGET: ${{ matrix.target }}
       EXT: ${{ contains(matrix.target, 'windows') && '.exe' || '' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install Rust
         run: rustup toolchain install && rustup target add "$TARGET"
@@ -91,13 +91,13 @@ jobs:
             tar -czf "../archive/tiny-hc-$TARGET.tar.gz" tiny-hc tiny-hc-tls
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bin-${{ matrix.target }}
           path: dist/
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: archive-${{ matrix.target }}
           path: archive/

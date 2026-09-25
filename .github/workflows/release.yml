@@ -21,14 +21,14 @@ jobs:
       attestations: write
       artifact-metadata: write
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           pattern: archive-*
           path: release/
           merge-multiple: true
 
       # The raw binaries, so a binary extracted from an archive can be verified too.
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           pattern: bin-*
           path: bin/
@@ -57,7 +57,7 @@ jobs:
             echo "::endgroup::"
           done
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: release/*
           generate_release_notes: true

@@ -229,9 +229,13 @@ fn remaining(deadline: Instant) -> io::Result<Duration> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "timed out"))
 }
 
-/// Socket timeouts surface as `WouldBlock` on Unix; report them as timeouts.
+/// Socket timeouts surface as `WouldBlock` on Unix and as `TimedOut` with a
+/// long OS message on Windows; report both the same way.
 fn timed_out(e: io::Error) -> io::Error {
-    if e.kind() == io::ErrorKind::WouldBlock { io::Error::new(io::ErrorKind::TimedOut, "timed out") } else { e }
+    match e.kind() {
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => io::Error::new(io::ErrorKind::TimedOut, "timed out"),
+        _ => e,
+    }
 }
 
 impl Read for Conn {
