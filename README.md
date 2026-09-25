@@ -114,9 +114,9 @@ mise picks the right asset for the OS and CPU and puts both `tiny-hc` and
 ### Docker
 
 Images are published to the GitHub Container Registry
-(`ghcr.io/fakhrulhilal/tiny-hc`) and Docker Hub (`fakhrulhilal/tiny-hc`), with
-the same tags on both; the examples below use ghcr.io, but
-`fakhrulhilal/tiny-hc:1` works just as well. The Linux image is built
+(`ghcr.io/fakhrulhilal/tiny-hc`) and Docker Hub (`iroel/tiny-hc`), with the
+same tags on both; the examples below use ghcr.io, but `iroel/tiny-hc:1` works
+just as well. The Linux image is built
 `FROM scratch`: it contains the two binaries in `/bin` and nothing else — no
 shell.
 
