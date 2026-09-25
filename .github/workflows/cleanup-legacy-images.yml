@@ -54,25 +54,6 @@ jobs:
             [[ "$DRY_RUN" == true ]] || docker buildx imagetools create -t "$image:0.1.0" "${sources[@]}"
           done
 
-      - name: Delete legacy tags on Docker Hub
-        env:
-          HUB_USER: ${{ vars.DOCKERHUB_USERNAME }}
-          HUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        run: |
-          repo="${HUB_REPO,,}"
-          jwt=$(jq -n --arg u "$HUB_USER" --arg p "$HUB_TOKEN" '{username: $u, password: $p}' |
-            curl -fsS -H 'Content-Type: application/json' -d @- https://hub.docker.com/v2/users/login | jq -r .token)
-          echo "::add-mask::$jwt"
-          tags=$(curl -fsS "https://hub.docker.com/v2/repositories/$repo/tags?page_size=100" | jq -r '.results[].name')
-          echo "all tags: $(paste -sd' ' - <<< "$tags")"
-          grep -E "$LEGACY" <<< "$tags" | while read -r tag; do
-            echo "delete $repo:$tag"
-            [[ "$DRY_RUN" == true ]] && continue
-            code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "Authorization: Bearer $jwt" \
-              "https://hub.docker.com/v2/repositories/$repo/tags/$tag/")
-            [[ "$code" == 204 ]] || { echo "::error::deleting $repo:$tag returned HTTP $code"; exit 1; }
-          done
-
       # ghcr.io cannot remove a single tag: delete each package version whose
       # tags are all legacy. Untagged versions are left alone (0.1.0 still
       # references the old Linux platform manifests).
@@ -92,3 +73,24 @@ jobs:
               echo "delete $id [$tags]"
               [[ "$DRY_RUN" == true ]] || gh api -X DELETE "/users/$owner/packages/container/$name/versions/$id"
             done
+
+      # Needs an access token with Delete permission; reported, not fatal.
+      - name: Delete legacy tags on Docker Hub
+        continue-on-error: true
+        env:
+          HUB_USER: ${{ vars.DOCKERHUB_USERNAME }}
+          HUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          repo="${HUB_REPO,,}"
+          jwt=$(jq -n --arg u "$HUB_USER" --arg p "$HUB_TOKEN" '{username: $u, password: $p}' |
+            curl -fsS -H 'Content-Type: application/json' -d @- https://hub.docker.com/v2/users/login | jq -r .token)
+          echo "::add-mask::$jwt"
+          tags=$(curl -fsS "https://hub.docker.com/v2/repositories/$repo/tags?page_size=100" | jq -r '.results[].name')
+          echo "all tags: $(paste -sd' ' - <<< "$tags")"
+          grep -E "$LEGACY" <<< "$tags" | while read -r tag; do
+            echo "delete $repo:$tag"
+            [[ "$DRY_RUN" == true ]] && continue
+            code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "Authorization: Bearer $jwt" \
+              "https://hub.docker.com/v2/repositories/$repo/tags/$tag/")
+            [[ "$code" == 204 ]] || { echo "::error::deleting $repo:$tag returned HTTP $code"; exit 1; }
+          done
