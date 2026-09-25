@@ -1,11 +1,8 @@
 name: docker
 
-# Assembles, tests and (optionally) pushes the images to ghcr.io and, when
-# configured, Docker Hub:
-#   <version>-linux             linux/amd64, linux/386 (static musl, FROM scratch)
-#   <version>-windows-ltsc2022  windows/amd64 (Nano Server)
-#   <version>-windows-ltsc2025  windows/amd64 (Nano Server)
-#   <version>                   all of the above in one manifest list
+# Assembles, tests and (optionally) pushes the Linux image (linux/amd64 and
+# linux/386, FROM scratch) to ghcr.io and, when configured, Docker Hub, tagged
+# <version>, <major>.<minor>, <major> and latest.
 # Needs the bin-* artifacts produced by build.yml in the same run.
 #
 # Docker Hub is enabled by the repository variable DOCKERHUB_USERNAME plus the
@@ -25,6 +22,10 @@ on:
     secrets:
       DOCKERHUB_TOKEN:
         required: false
+    outputs:
+      tags:
+        description: Every pushed image reference, one per line
+        value: ${{ jobs.image.outputs.tags }}
 
 permissions:
   contents: read
@@ -34,39 +35,14 @@ defaults:
   run:
     shell: bash
 
+env:
+  PLATFORMS: linux/amd64,linux/386
+
 jobs:
-  meta:
+  image:
     runs-on: ubuntu-latest
     outputs:
-      images: ${{ steps.meta.outputs.images }}
-      dockerhub: ${{ steps.meta.outputs.dockerhub }}
-    steps:
-      - id: meta
-        env:
-          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
-          DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-          PUSH: ${{ inputs.push }}
-        run: |
-          images="ghcr.io/${GITHUB_REPOSITORY,,}"
-          dockerhub=false
-          if [[ -n "$DOCKERHUB_USERNAME" ]]; then
-            if [[ "$PUSH" == true && -z "$DOCKERHUB_TOKEN" ]]; then
-              echo "::error::DOCKERHUB_USERNAME is set but the DOCKERHUB_TOKEN secret is missing"
-              exit 1
-            fi
-            images+=" docker.io/${DOCKERHUB_IMAGE:-$DOCKERHUB_USERNAME/tiny-hc}"
-            dockerhub=true
-          fi
-          echo "images=${images,,}" >> "$GITHUB_OUTPUT"
-          echo "dockerhub=$dockerhub" >> "$GITHUB_OUTPUT"
-          echo "Publishing to: $images"
-
-  linux:
-    needs: meta
-    runs-on: ubuntu-latest
-    env:
-      IMAGES: ${{ needs.meta.outputs.images }}
+      tags: ${{ steps.tags.outputs.list }}
     steps:
       - uses: actions/checkout@v7
 
@@ -79,6 +55,30 @@ jobs:
           for d in dist/bin-*; do mv "$d" "dist/${d#dist/bin-}"; done
           chmod +x dist/*/tiny-hc*
           ls -lR dist
+
+      - name: Image names and tags
+        id: tags
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          PUSH: ${{ inputs.push }}
+        run: |
+          images=("ghcr.io/${GITHUB_REPOSITORY,,}")
+          if [[ -n "$DOCKERHUB_USERNAME" ]]; then
+            if [[ "$PUSH" == true && -z "$DOCKERHUB_TOKEN" ]]; then
+              echo "::error::DOCKERHUB_USERNAME is set but the DOCKERHUB_TOKEN secret is missing"
+              exit 1
+            fi
+            hub="${DOCKERHUB_IMAGE:-$DOCKERHUB_USERNAME/tiny-hc}"
+            images+=("docker.io/${hub,,}")
+            echo "dockerhub=true" >> "$GITHUB_OUTPUT"
+          fi
+          {
+            echo 'list<<EOF'
+            for image in "${images[@]}"; do scripts/docker-tags.sh "$image" "${{ inputs.version }}"; done
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v4
 
@@ -104,130 +104,38 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - if: inputs.push && needs.meta.outputs.dockerhub == 'true'
+      - if: inputs.push && steps.tags.outputs.dockerhub == 'true'
         uses: docker/login-action@v4
         with:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # Provenance/SBOM entries are left out so the image lists exactly the two
+      # platforms (they otherwise show up as "unknown/unknown").
       - name: Push
         if: inputs.push
+        env:
+          TAGS: ${{ steps.tags.outputs.list }}
         run: |
-          tags=()
-          for image in $IMAGES; do
-            while read -r tag; do tags+=(-t "$tag"); done < <(scripts/docker-tags.sh "$image" linux "${{ inputs.version }}")
-          done
-          docker buildx build --push --platform linux/amd64,linux/386 \
+          args=()
+          while read -r tag; do args+=(-t "$tag"); done <<< "$TAGS"
+          docker buildx build --push --platform "$PLATFORMS" --provenance=false --sbom=false \
             --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
             --label "org.opencontainers.image.version=${{ inputs.version }}" \
-            "${tags[@]}" .
+            "${args[@]}" .
 
-  windows:
-    needs: meta
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: windows-2022, flavour: windows-ltsc2022, base: ltsc2022 }
-          - { os: windows-2025, flavour: windows-ltsc2025, base: ltsc2025 }
-    env:
-      IMAGES: ${{ needs.meta.outputs.images }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: bin-x86_64-pc-windows-msvc
-          path: dist/x86_64-pc-windows-msvc/
-
-      # The Docker service is occasionally not running yet on fresh Windows runners.
-      - name: Ensure Docker is running
-        shell: pwsh
-        run: |
-          if ((Get-Service docker).Status -ne 'Running') { Start-Service docker }
-          for ($i = 0; $i -lt 30; $i++) {
-            docker version *> $null
-            if ($LASTEXITCODE -eq 0) { docker version; exit 0 }
-            Start-Sleep -Seconds 5
-          }
-          docker version
-          exit 1
-
-      - name: Build
-        run: |
-          docker build -f Dockerfile.windows --build-arg WINDOWS_VERSION=${{ matrix.base }} \
-            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
-            --label "org.opencontainers.image.version=${{ inputs.version }}" \
-            -t test .
-
-      - name: Test
-        run: |
-          docker run --rm test --version
-          docker run --rm --entrypoint 'C:\tiny-hc\tiny-hc-tls.exe' test --timeout 15 https://github.com/
-
-      - if: inputs.push
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - if: inputs.push && needs.meta.outputs.dockerhub == 'true'
-        uses: docker/login-action@v4
-        with:
-          username: ${{ vars.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Push
+      - name: Verify every tag has every platform
         if: inputs.push
+        env:
+          TAGS: ${{ steps.tags.outputs.list }}
         run: |
-          for image in $IMAGES; do
-            scripts/docker-tags.sh "$image" ${{ matrix.flavour }} "${{ inputs.version }}" | while read -r tag; do
-              docker tag test "$tag"
-              docker push "$tag"
-            done
-          done
-
-  manifest:
-    if: inputs.push
-    needs: [meta, linux, windows]
-    runs-on: ubuntu-latest
-    env:
-      IMAGES: ${{ needs.meta.outputs.images }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: docker/setup-buildx-action@v4
-
-      - uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - if: needs.meta.outputs.dockerhub == 'true'
-        uses: docker/login-action@v4
-        with:
-          username: ${{ vars.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      # `docker manifest` (unlike `buildx imagetools create`) records each Windows
-      # image's os.version, which Windows hosts need to pick the image matching
-      # their build. It cannot nest a manifest list, so the Linux image is added
-      # by its per-platform digests.
-      - name: Merge linux + windows into the plain tags
-        run: |
-          for image in $IMAGES; do
-            tags() { scripts/docker-tags.sh "$image" "$1" "${{ inputs.version }}"; }
-            paste -d ' ' <(tags "") <(tags linux) <(tags windows-ltsc2022) <(tags windows-ltsc2025) |
-              while read -r target linux win2022 win2025; do
-                sources=()
-                while read -r digest; do sources+=("$image@$digest"); done < <(
-                  docker buildx imagetools inspect "$linux" --raw |
-                    jq -r '.manifests[] | select(.platform.os == "linux") | .digest')
-                docker manifest create --amend "$target" "${sources[@]}" "$win2022" "$win2025"
-                docker manifest inspect "$target" | jq -c '.manifests[].platform'
-                docker manifest push --purge "$target"
-              done
-          done
+          want=$(tr ',' '\n' <<< "$PLATFORMS" | sort | paste -sd' ' -)
+          while read -r tag; do
+            got=$(docker buildx imagetools inspect "$tag" --raw |
+              jq -r '.manifests[].platform | "\(.os)/\(.architecture)"' | sort | paste -sd' ' -)
+            echo "$tag: $got"
+            if [[ "$got" != "$want" ]]; then
+              echo "::error::$tag has platforms [$got], expected [$want]"
+              exit 1
+            fi
+          done <<< "$TAGS"

@@ -113,22 +113,18 @@ mise picks the right asset for the OS and CPU and puts both `tiny-hc` and
 
 ### Docker
 
-Images are published to the GitHub Container Registry
-(`ghcr.io/fakhrulhilal/tiny-hc`) and Docker Hub (`iroel/tiny-hc`), with the
-same tags on both; the examples below use ghcr.io, but `iroel/tiny-hc:1` works
-just as well. The Linux image is built
-`FROM scratch`: it contains the two binaries in `/bin` and nothing else — no
-shell.
+The image is published to the GitHub Container Registry and Docker Hub, for
+**linux/amd64** (x86 64-bit) and **linux/386** (x86 32-bit):
 
-| Tag                                          | Platforms                             | Contents                   |
-|----------------------------------------------|---------------------------------------|----------------------------|
-| `latest`, `1`, `1.2`, `1.2.3`                | linux/amd64, linux/386, windows/amd64 | all of the images below    |
-| `linux`, `1.2.3-linux`                       | linux/amd64, linux/386                | `/bin/tiny-hc`, `/bin/tiny-hc-tls` |
-| `windows-ltsc2022`, `1.2.3-windows-ltsc2022` | windows/amd64 (Server 2022)           | Nano Server, `C:\tiny-hc\*.exe` |
-| `windows-ltsc2025`, `1.2.3-windows-ltsc2025` | windows/amd64 (Server 2025)           | Nano Server, `C:\tiny-hc\*.exe` |
+| Registry   | Image                          | Tags                                |
+|------------|--------------------------------|-------------------------------------|
+| ghcr.io    | `ghcr.io/fakhrulhilal/tiny-hc` | `latest`, `1`, `1.2`, `1.2.3`       |
+| Docker Hub | `iroel/tiny-hc`                | `latest`, `1`, `1.2`, `1.2.3`       |
 
-(`1.2.3` stands for any released version.) The usual way to use it is to copy
-the binary into your own image — any Linux base works:
+(`1.2.3` stands for any released version; each GitHub release lists its exact
+tags.) The image is built `FROM scratch`: it contains the two binaries in
+`/bin` and nothing else — no shell. The usual way to use it is to copy the
+binary into your own image — any Linux base works:
 
 ```dockerfile
 # Any base works: debian, ubuntu, alpine, gcr.io/distroless/static, scratch, ...
@@ -143,13 +139,6 @@ COPY --from=ghcr.io/fakhrulhilal/tiny-hc:1 /bin/tiny-hc-tls /bin/tiny-hc-tls
 HEALTHCHECK CMD ["/bin/tiny-hc-tls", "--expect-response", "healthy", "https://127.0.0.1:8443/health"]
 ```
 
-```dockerfile
-# Windows
-FROM mcr.microsoft.com/windows/nanoserver:ltsc2022
-COPY --from=ghcr.io/fakhrulhilal/tiny-hc:1 C:/tiny-hc/tiny-hc.exe C:/tiny-hc/tiny-hc.exe
-HEALTHCHECK CMD ["C:\\tiny-hc\\tiny-hc.exe", "http://127.0.0.1:8080/health"]
-```
-
 Use the exec form (`CMD ["..."]`) of `HEALTHCHECK`: the shell form needs
 `/bin/sh`, which distroless images do not have.
 
@@ -160,10 +149,7 @@ docker run --rm --network host ghcr.io/fakhrulhilal/tiny-hc http://127.0.0.1:808
 docker run --rm --entrypoint /bin/tiny-hc-tls ghcr.io/fakhrulhilal/tiny-hc https://example.com
 ```
 
-Windows containers are amd64 only: there is no 32-bit Windows container
-platform, and Nano Server cannot run 32-bit programs. Nano Server always
-contains `cmd.exe`, so the Windows images are as small as Windows allows, not
-shell-free.
+There are no Windows images; on Windows use the release packages.
 
 ### Manual download
 
@@ -256,7 +242,7 @@ on Windows with the MSVC build tools, running the script from Git Bash.
 
 ### Docker images
 
-The Dockerfiles do not compile anything; they package the binaries from
+The Dockerfile does not compile anything; it packages the binaries from
 `dist/`, so build those first:
 
 ```sh
@@ -272,18 +258,12 @@ Building both platforms in one go (as CI does) needs a `docker-container`
 builder (`docker buildx create --use`) plus `--push`, or the containerd image
 store.
 
-Windows (on a Windows host, after `scripts/build.sh x86_64-pc-windows-msvc`):
-
-```powershell
-docker build -f Dockerfile.windows --build-arg WINDOWS_VERSION=ltsc2022 -t tiny-hc:windows-ltsc2022 .
-```
-
 ## CI / releases
 
 | Workflow | Trigger | What it does |
 |----------|---------|--------------|
-| `ci.yml` | push to `main`, pull requests | fmt, clippy, tests on Linux/macOS/Windows, builds every target, builds and tests every image (no push) |
-| `release.yml` | tag `v*` | the builds above, signed build-provenance attestations for every archive and binary (verified before publishing), a GitHub release with the archives and `SHA256SUMS`, images pushed to `ghcr.io` and Docker Hub |
+| `ci.yml` | push to `main`, pull requests | fmt, clippy, tests on Linux/macOS/Windows, builds every target, builds and tests the image (no push) |
+| `release.yml` | tag `v*` | the builds above, signed build-provenance attestations for every archive and binary (verified before publishing), a check that all five packages (x86 64/32-bit Linux and Windows, macOS arm64) are present, a GitHub release with the archives and `SHA256SUMS`, the image pushed to `ghcr.io` and Docker Hub (every tag verified to contain linux/amd64 and linux/386), and the image tags added to the release notes |
 | `build.yml`, `docker.yml` | reusable | the build matrix and the image jobs shared by the two above |
 
 Images always go to `ghcr.io/<owner>/<repo>` (using the built-in

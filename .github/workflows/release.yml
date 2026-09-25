@@ -33,6 +33,18 @@ jobs:
           pattern: bin-*
           path: bin/
 
+      # Every supported target must be in the release: x86 64-bit and 32-bit for
+      # Linux and Windows, plus macOS arm64.
+      - name: Check all packages are present
+        run: |
+          missing=0
+          for f in tiny-hc-x86_64-unknown-linux-musl.tar.gz tiny-hc-i686-unknown-linux-musl.tar.gz \
+                   tiny-hc-x86_64-pc-windows-msvc.zip tiny-hc-i686-pc-windows-msvc.zip \
+                   tiny-hc-aarch64-apple-darwin.tar.gz; do
+            if [[ -f "release/$f" ]]; then echo "ok      $f"; else echo "::error::missing $f"; missing=1; fi
+          done
+          exit $missing
+
       - name: Checksums
         working-directory: release
         run: sha256sum -- * > SHA256SUMS && cat SHA256SUMS
@@ -74,3 +86,28 @@ jobs:
       version: ${{ github.ref_name }}
     secrets:
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+
+  # Lists every published image (ghcr.io and Docker Hub) in the release notes.
+  release-notes:
+    needs: [release, docker]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Add Docker images to the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAGS: ${{ needs.docker.outputs.tags }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --json body --jq .body > notes.md
+          if grep -q '^## 🐋 Docker images' notes.md; then
+            echo "Docker images already listed"
+            exit 0
+          fi
+          {
+            printf '\n## 🐋 Docker images\n\nlinux/amd64 and linux/386:\n\n```\n'
+            printf '%s\n' "$TAGS"
+            printf '```\n'
+          } >> notes.md
+          gh release edit "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --notes-file notes.md
+          cat notes.md
