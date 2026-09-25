@@ -3,6 +3,8 @@ name: build
 # Builds both binaries for every supported target and uploads:
 #   bin-<target>      raw binaries (used to assemble Docker images)
 #   archive-<target>  tiny-hc-<target>.tar.gz / .zip (release assets, mise)
+# Targets marked `container: true` only go into the Docker image: they get no
+# release archive and are smoke-tested by the Docker job (under QEMU).
 on:
   workflow_call:
 
@@ -22,6 +24,7 @@ jobs:
           - { target: x86_64-pc-windows-msvc, os: windows-latest }
           - { target: i686-pc-windows-msvc, os: windows-latest }
           - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-latest, container: true }
     defaults:
       run:
         shell: bash
@@ -54,6 +57,7 @@ jobs:
         run: scripts/build.sh "$TARGET" dist
 
       - name: Smoke test
+        if: ${{ !matrix.container }}
         run: |
           "dist/tiny-hc$EXT" --version
           "dist/tiny-hc-tls$EXT" --version
@@ -82,6 +86,7 @@ jobs:
           fi
 
       - name: Package
+        if: ${{ !matrix.container }}
         run: |
           mkdir -p archive
           cd dist
@@ -98,6 +103,7 @@ jobs:
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v7
+        if: ${{ !matrix.container }}
         with:
           name: archive-${{ matrix.target }}
           path: archive/

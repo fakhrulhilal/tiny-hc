@@ -103,18 +103,28 @@ gh attestation verify /usr/local/bin/tiny-hc-tls --repo fakhrulhilal/tiny-hc
 mise use -g github:fakhrulhilal/tiny-hc
 ```
 
-mise picks the right asset for the OS and CPU and puts both `tiny-hc` and
-`tiny-hc-tls` on the `PATH`. Or in `mise.toml`:
+mise picks the right asset for the OS and CPU, verifies its GitHub artifact
+attestation, and puts both `tiny-hc` and `tiny-hc-tls` on the `PATH`. Or in
+`mise.toml`:
 
 ```toml
 [tools]
 "github:fakhrulhilal/tiny-hc" = "latest"
 ```
 
+mise ignores releases younger than 24 hours by default (its
+`minimum_release_age` setting), so right after a release it reports "no
+versions found". To install a release published today:
+
+```sh
+mise use -g --minimum-release-age 0 github:fakhrulhilal/tiny-hc
+```
+
 ### Docker
 
 The image is published to the GitHub Container Registry and Docker Hub, for
-**linux/amd64** (x86 64-bit) and **linux/386** (x86 32-bit):
+**linux/amd64** (x86 64-bit), **linux/386** (x86 32-bit) and **linux/arm64**
+(for example Docker on Apple silicon Macs):
 
 | Registry   | Image                          | Tags                                |
 |------------|--------------------------------|-------------------------------------|

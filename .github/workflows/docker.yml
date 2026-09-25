@@ -1,8 +1,10 @@
 name: docker
 
-# Assembles, tests and (optionally) pushes the Linux image (linux/amd64 and
-# linux/386, FROM scratch) to ghcr.io and, when configured, Docker Hub, tagged
-# <version>, <major>.<minor>, <major> and latest.
+# Assembles, tests and (optionally) pushes the Linux image (linux/amd64,
+# linux/386 and linux/arm64, FROM scratch) to ghcr.io and, when configured,
+# Docker Hub, tagged <version>, <major>.<minor>, <major> and latest. The image
+# description is the GitHub repository description; on Docker Hub it is also
+# set as the repository description, with README.md as the overview.
 # Needs the bin-* artifacts produced by build.yml in the same run.
 #
 # Docker Hub is enabled by the repository variable DOCKERHUB_USERNAME plus the
@@ -36,7 +38,8 @@ defaults:
     shell: bash
 
 env:
-  PLATFORMS: linux/amd64,linux/386
+  PLATFORMS: linux/amd64,linux/386,linux/arm64
+  ICON: https://cdn.jsdelivr.net/npm/lucide-static@1.48.0/icons/heart-pulse.svg
 
 jobs:
   image:
@@ -80,11 +83,32 @@ jobs:
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
+      - name: Image metadata
+        id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          description=$(gh api "repos/$GITHUB_REPOSITORY" --jq .description)
+          if [[ -z "$description" ]]; then
+            echo "::error::the GitHub repository has no description (used as the image description)"
+            exit 1
+          fi
+          {
+            echo "description=$description"
+            echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "revision=${GITHUB_SHA::7}"
+          } >> "$GITHUB_OUTPUT"
+
+      # linux/arm64 is tested under emulation on this x86_64 runner.
+      - uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+
       - uses: docker/setup-buildx-action@v4
 
       - name: Test
         run: |
-          for pair in linux/amd64:x86_64 linux/386:i686; do
+          for pair in linux/amd64:x86_64 linux/386:i686 linux/arm64:aarch64; do
             platform="${pair%%:*}"
             bin="/dist/${pair##*:}-unknown-linux-musl"
             docker buildx build --load --platform "$platform" -t test .
@@ -110,19 +134,38 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Provenance/SBOM entries are left out so the image lists exactly the two
-      # platforms (they otherwise show up as "unknown/unknown").
+      # Provenance/SBOM entries are left out so the image lists exactly the
+      # platforms above (they otherwise show up as "unknown/unknown").
       - name: Push
         if: inputs.push
         env:
           TAGS: ${{ steps.tags.outputs.list }}
+          DESCRIPTION: ${{ steps.meta.outputs.description }}
+          SOURCE: ${{ github.server_url }}/${{ github.repository }}
+          VERSION: ${{ inputs.version }}
         run: |
           args=()
           while read -r tag; do args+=(-t "$tag"); done <<< "$TAGS"
+          labels=(
+            "org.opencontainers.image.title=tiny-hc"
+            "org.opencontainers.image.description=$DESCRIPTION"
+            "org.opencontainers.image.version=${VERSION#v}"
+            "org.opencontainers.image.revision=${{ steps.meta.outputs.revision }}"
+            "org.opencontainers.image.created=${{ steps.meta.outputs.created }}"
+            "org.opencontainers.image.source=$SOURCE"
+            "org.opencontainers.image.url=$SOURCE"
+            "org.opencontainers.image.licenses=MIT"
+            "com.docker.desktop.extension.icon=$ICON"
+            "dev.orbstack.icon=$ICON"
+          )
+          for l in "${labels[@]}"; do args+=(--label "$l"); done
+          # Registries show the multi-platform index's annotations on the package page.
+          for key in description source licenses; do
+            for l in "${labels[@]}"; do
+              [[ "$l" == "org.opencontainers.image.$key="* ]] && args+=(--annotation "index:$l")
+            done
+          done
           docker buildx build --push --platform "$PLATFORMS" --provenance=false --sbom=false \
-            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
-            --label "org.opencontainers.image.version=${{ inputs.version }}" \
-            --label "org.opencontainers.image.licenses=MIT" \
             "${args[@]}" .
 
       - name: Verify every tag has every platform
@@ -140,3 +183,20 @@ jobs:
               exit 1
             fi
           done <<< "$TAGS"
+
+      # Reported, not fatal: the images are already pushed and verified.
+      - name: Docker Hub description
+        if: inputs.push && steps.tags.outputs.dockerhub == 'true'
+        continue-on-error: true
+        env:
+          HUB_USER: ${{ vars.DOCKERHUB_USERNAME }}
+          HUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          HUB_REPO: ${{ vars.DOCKERHUB_IMAGE || format('{0}/tiny-hc', vars.DOCKERHUB_USERNAME) }}
+          DESCRIPTION: ${{ steps.meta.outputs.description }}
+        run: |
+          jwt=$(jq -n --arg u "$HUB_USER" --arg p "$HUB_TOKEN" '{username: $u, password: $p}' |
+            curl -fsS -H 'Content-Type: application/json' -d @- https://hub.docker.com/v2/users/login | jq -r .token)
+          echo "::add-mask::$jwt"
+          jq -n --arg d "$DESCRIPTION" --rawfile f README.md '{description: $d, full_description: $f}' |
+            curl -fsS -X PATCH -H "Authorization: Bearer $jwt" -H 'Content-Type: application/json' -d @- \
+              "https://hub.docker.com/v2/repositories/${HUB_REPO,,}/" | jq -r '"Docker Hub description: \(.description)"'
